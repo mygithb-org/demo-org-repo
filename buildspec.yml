@@ -1,0 +1,63 @@
+version: 0.2
+phases:
+  install:
+    commands:
+      - curl -sS -o aws-iam-authenticator https://amazon-eks.s3-us-west-2.amazonaws.com/1.12.7/2019-03-27/bin/linux/amd64/aws-iam-authenticator
+      - curl -sS -o kubectl https://amazon-eks.s3-us-west-2.amazonaws.com/1.12.7/2019-03-27/bin/linux/amd64/kubectl
+      - chmod +x ./kubectl ./aws-iam-authenticator
+      - export PATH=$PWD/:$PATH
+      - apt-get update && apt-get -y install dnsutils jq python3-pip python3-dev && pip3 install --upgrade awscli
+  pre_build:
+    commands:
+      - LABEL_BJP=$(echo "Babel.ECQ.BackgroundJobProcessor_V2_$CODEBUILD_RESOLVED_SOURCE_VERSION")
+      - LABEL_WEB=$(echo "Babel.ECQ.Web_V2_$CODEBUILD_RESOLVED_SOURCE_VERSION")
+      - export AWS_ACCOUNT=$(echo $CODEBUILD_BUILD_ARN |cut -f5 -d:)
+      - export _PROFILE_=${_PROFILE_}
+      - 'echo "ACCOUNT: $AWS_ACCOUNT"'
+      - 'echo "_ENV_: $_ENV_"'
+      - 'echo "SUBNETS: $SUBNETS"'
+      - ls -l .
+
+      - sed -i "s/Babel.ECQ.Web/$LABEL_WEB/g" ./src/Babel.ECQ.Web/Templates/Kubernetes_Service.yml
+      - sed -i "s/_AWS_ACCOUNT_/$AWS_ACCOUNT/g" ./src/Babel.ECQ.Web/Templates/Kubernetes_Service.yml
+      - sed -i "s/_PROFILE_/$_PROFILE_/g" ./src/Babel.ECQ.Web/Templates/Kubernetes_Service.yml
+      - sed -i "s#_SUBNETS_#$SUBNETS#g" ./src/Babel.ECQ.Web/Templates/Kubernetes_Service.yml
+      - sed -i "s/Babel.ECQ.BackgroundJobProcessor/$LABEL_BJP/g" ./src/Babel.ECQ.BackgroundJobProcessor/Templates/Kubernetes_Service.yml
+      - sed -i "s/_AWS_ACCOUNT_/$AWS_ACCOUNT/g" ./src/Babel.ECQ.BackgroundJobProcessor/Templates/Kubernetes_Service.yml
+      - sed -i "s/_PROFILE_/$_PROFILE_/g" ./src/Babel.ECQ.BackgroundJobProcessor/Templates/Kubernetes_Service.yml
+      - sed -i "s#_SUBNETS_#$SUBNETS#g" ./src/Babel.ECQ.BackgroundJobProcessor/Templates/Kubernetes_Service.yml
+      - sed -i "s/_AWS_ACCOUNT_/$AWS_ACCOUNT/g" ./src/Templates/Kube2Iam.yaml
+      - sed -i "s/_ENV_/$_ENV_/g" ./src/Babel.ECQ.Web/Templates/ecq_Egress_Rule_For_Istio.yaml
+      - sed -i "s/_ENV_/$_ENV_/g" ./src/Babel.ECQ.BackgroundJobProcessor/Templates/ecq_Egress_Rule_For_Istio.yaml
+
+      - $(aws ecr get-login --no-include-email)
+      - export KUBECONFIG=$HOME/.kube/config
+  build:
+    commands:
+      - cd ./src
+      - $(aws ecr get-login --no-include-email)      
+      - docker build --tag $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_BJP -f ./Babel.ECQ.BackgroundJobProcessor/Dockerfile .
+      - docker push $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_BJP
+      - docker build --tag $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_WEB -f ./Babel.ECQ.Web/Dockerfile .
+      - docker push $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_WEB
+  post_build:
+    commands:
+      - CREDENTIALS=$(aws sts assume-role --role-arn arn:aws:iam::$AWS_ACCOUNT:role/EKS_ServiceRole_ReadOnly_Kubernetes --role-session-name codebuild-kubectl --duration-seconds 900)
+      - export AWS_ACCESS_KEY_ID="$(echo ${CREDENTIALS} | jq -r '.Credentials.AccessKeyId')"
+      - export AWS_SECRET_ACCESS_KEY="$(echo ${CREDENTIALS} | jq -r '.Credentials.SecretAccessKey')"
+      - export AWS_SESSION_TOKEN="$(echo ${CREDENTIALS} | jq -r '.Credentials.SessionToken')"
+      - export AWS_EXPIRATION=$(echo ${CREDENTIALS} | jq -r '.Credentials.Expiration')
+      - aws sts get-caller-identity
+      - aws eks update-kubeconfig --name babelhealth
+      - kubectl apply -f ./Templates/Kube2Iam.yaml
+      - kubectl apply -f ./Babel.ECQ.Web/Templates/Kubernetes_Service.yml
+      - kubectl apply -f ./Babel.ECQ.Web/Templates/ecq_Egress_Rule_For_Istio.yaml
+      - printf '[{"name":"Babel.ECQ.Web","imageUri":"%s"}]' $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_WEB > ../web.json
+      - kubectl apply -f ./Babel.ECQ.BackgroundJobProcessor/Templates/ecq_Egress_Rule_For_Istio.yaml
+      - kubectl apply -f ./Babel.ECQ.BackgroundJobProcessor/Templates/Kubernetes_Service.yml
+      - printf '[{"name":"Babel.ECQ.BackgroundJobProcessor","imageUri":"%s"}]' $AWS_ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/babelhealth:$LABEL_BJP > ../bjp.json
+      
+artifacts:
+  files:
+    - bjp.json
+    - web.json
